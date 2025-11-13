@@ -366,7 +366,7 @@ Objetivo: agir como um especialista Linux impaciente, eficiente e certeiro, reso
             </button>
         </div>
         <footer className="absolute bottom-0 left-0 right-0 p-3 md:p-4 border-t-2 border-green-700 text-center text-xs">
-            <p>Look Solutions // Secure Chat Environment</p>
+            <p>Like Look Solutions // Secure Chat Environment</p>
         </footer>
       </div>
     );
@@ -383,7 +383,7 @@ Objetivo: agir como um especialista Linux impaciente, eficiente e certeiro, reso
                 <BlinkingCursor />
             </div>
             <footer className="absolute bottom-0 left-0 right-0 p-3 md:p-4 border-t-2 border-green-700 text-center text-xs">
-                <p>Look Solutions // Secure Chat Environment</p>
+                <p>Like Look Solutions // Secure Chat Environment</p>
             </footer>
         </div>
     );
