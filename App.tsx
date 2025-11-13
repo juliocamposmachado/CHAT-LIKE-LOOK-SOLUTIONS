@@ -22,12 +22,12 @@ const App: React.FC = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  // Effect to scroll down when new messages are added.
+  // Effect to scroll down when new messages are added or updated.
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
 
-  // Effect to initialize the Gemini chat session and get a welcome message on component mount.
+  // Effect to initialize the Gemini chat session and stream a welcome message.
   useEffect(() => {
     const initializeChat = async () => {
       setIsLoading(true);
@@ -43,10 +43,19 @@ const App: React.FC = () => {
           },
         });
         setChat(chatSession);
+
+        setMessages([{ author: Author.BOT, text: '' }]);
+        const responseStream = await chatSession.sendMessageStream({ message: "Generate a short, friendly welcome message for the Chat Like Look Solutions terminal. Greet the user and invite them to start chatting." });
         
-        const response = await chatSession.sendMessage({ message: "Generate a short, friendly welcome message for the Chat Like Look Solutions terminal. Greet the user and invite them to start chatting." });
-        const welcomeMessage: Message = { author: Author.BOT, text: response.text };
-        setMessages([welcomeMessage]);
+        let accumulatedText = "";
+        for await (const chunk of responseStream) {
+          accumulatedText += chunk.text;
+          setMessages(prev => {
+            const newMessages = [...prev];
+            newMessages[0] = { ...newMessages[0], text: accumulatedText };
+            return newMessages;
+          });
+        }
 
       } catch (error) {
         console.error("Failed to initialize Gemini AI:", error);
@@ -68,28 +77,39 @@ const App: React.FC = () => {
   }, [isLoading]);
 
 
-  // Handler for form submission.
+  // Handler for form submission to send a message and stream the response.
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading || !chat) return;
 
     const userMessage: Message = { author: Author.USER, text: input };
-    setMessages(prev => [...prev, userMessage]);
+    setMessages(prev => [...prev, userMessage, { author: Author.BOT, text: '' }]);
     const currentInput = input;
     setInput('');
     setIsLoading(true);
 
     try {
-      const response = await chat.sendMessage({ message: currentInput });
-      const botMessage: Message = { author: Author.BOT, text: response.text };
-      setMessages(prev => [...prev, botMessage]);
+      const responseStream = await chat.sendMessageStream({ message: currentInput });
+      let accumulatedText = "";
+      for await (const chunk of responseStream) {
+        accumulatedText += chunk.text;
+        setMessages(prev => {
+          const newMessages = [...prev];
+          newMessages[newMessages.length - 1] = { ...newMessages[newMessages.length - 1], text: accumulatedText };
+          return newMessages;
+        });
+      }
     } catch (error) {
       console.error("Gemini API error:", error);
       const errorMessage: Message = {
         author: Author.BOT,
         text: 'Sorry, I encountered an error. Please try again.',
       };
-      setMessages(prev => [...prev, errorMessage]);
+      setMessages(prev => {
+        const newMessages = [...prev];
+        newMessages[newMessages.length - 1] = errorMessage;
+        return newMessages;
+      });
     } finally {
       setIsLoading(false);
     }
@@ -129,19 +149,12 @@ const App: React.FC = () => {
             <span className={`flex-shrink-0 ${msg.author === Author.USER ? "text-green-300" : "text-green-500"}`}>
               {msg.author === Author.USER ? 'user@local:~$' : 'looks-bot@remote:~#'}
             </span>
-            <p className="ml-0 md:ml-2 whitespace-pre-wrap break-words">{msg.text}</p>
+            <p className="ml-0 md:ml-2 whitespace-pre-wrap break-words flex items-center">
+              {msg.text}
+              {isLoading && msg.author === Author.BOT && index === messages.length - 1 && <BlinkingCursor />}
+            </p>
           </div>
         ))}
-        {isLoading && (
-          <div className="flex items-center">
-            <span className="text-green-500">looks-bot@remote:~#</span>
-            <div className="ml-2 flex items-center">
-              <span className="animate-pulse">.</span>
-              <span className="animate-pulse" style={{ animationDelay: '75ms' }}>.</span>
-              <span className="animate-pulse" style={{ animationDelay: '150ms' }}>.</span>
-            </div>
-          </div>
-        )}
         <div ref={messagesEndRef} />
       </main>
 
