@@ -1,0 +1,5 @@
+{
+  "name": "Chat Like Look Solutions",
+  "description": "A terminal-style chat application powered by Google's Gemini API for a conversational AI experience. Created by Look Solutions.",
+  "requestFramePermissions": []
+}
