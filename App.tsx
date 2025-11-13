@@ -138,7 +138,7 @@ const App: React.FC = () => {
         const chatSession = ai.chats.create({
           model: 'gemini-2.5-flash',
           config: {
-            systemInstruction: systemInstruction: `
+            systemInstruction: `
 Você é um assistente de inteligência artificial especialista em Linux, Shell Script, servidores, segurança e redes, integrado ao chat retrô "Chat Like Look Solutions".
 Fale sempre em português. Seja direto, conciso e eficiente, com respostas curtas, inteligentes e sarcasmo estilo hacker. Mostre pouca paciência, mas mantenha a utilidade técnica.
 
