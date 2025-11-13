@@ -1,4 +1,5 @@
 
+
 import React, { useState, useEffect, useRef, FormEvent } from 'react';
 import { GoogleGenAI, Chat } from '@google/genai';
 import { Message, Author } from './types';
@@ -20,6 +21,85 @@ const App: React.FC = () => {
   const [copyText, setCopyText] = useState<string>('Invite');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+
+  // --- Notification and Realtime Logic ---
+
+  // Draws a custom favicon, with an optional notification dot.
+  const drawFavicon = (withNotification: boolean) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 32;
+    canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Base icon style
+    ctx.fillStyle = '#1f2937'; // bg-gray-800
+    ctx.fillRect(0, 0, 32, 32);
+    ctx.fillStyle = '#4ade80'; // text-green-400
+    ctx.font = 'bold 20px "Courier New", monospace';
+    ctx.fillText('>', 4, 23);
+    ctx.fillText('_', 14, 23);
+
+    // Notification dot
+    if (withNotification) {
+      ctx.beginPath();
+      ctx.arc(24, 8, 7, 0, 2 * Math.PI, false);
+      ctx.fillStyle = '#ef4444'; // red-500
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#ffffff'; // white
+      ctx.stroke();
+    }
+
+    const link = document.getElementById('favicon') as HTMLLinkElement | null;
+    if (link) {
+      link.href = canvas.toDataURL('image/png');
+    }
+  };
+
+  // Plays a simple "bleep" sound for notifications.
+  const playNotificationSound = () => {
+    if (!audioContextRef.current) return;
+    const audioContext = audioContextRef.current;
+    if (audioContext.state === 'suspended') {
+      audioContext.resume();
+    }
+
+    const oscillator = audioContext.createOscillator();
+    const gainNode = audioContext.createGain();
+
+    oscillator.connect(gainNode);
+    gainNode.connect(audioContext.destination);
+
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(880, audioContext.currentTime);
+    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+
+    oscillator.start(audioContext.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.5);
+    oscillator.stop(audioContext.currentTime + 0.5);
+  };
+  
+  // Effect to draw the initial favicon.
+  useEffect(() => {
+    drawFavicon(false);
+  }, []);
+
+  // Effect to handle browser tab visibility changes (to reset favicon).
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        drawFavicon(false);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
+  // --- Core Application Logic ---
 
   // On initial load, check URL for a room ID.
   useEffect(() => {
@@ -30,14 +110,13 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Load a room from Supabase and initialize the chat session.
+  // Load a room from Supabase, initialize chat, and subscribe to realtime updates.
   useEffect(() => {
     const loadRoomAndInitializeChat = async () => {
       if (!roomId) return;
 
       setIsLoading(true);
       try {
-        // Fetch chat history from Supabase
         const { data: messageData, error: messageError } = await supabase
           .from('messages')
           .select('*')
@@ -46,33 +125,21 @@ const App: React.FC = () => {
 
         if (messageError) throw new Error(messageError.message);
         
-        // If no messages, check if room exists but is empty. If room doesn't exist, this will throw.
         if (messageData.length === 0) {
-            const { error: roomError } = await supabase
-                .from('rooms')
-                .select('id')
-                .eq('id', roomId)
-                .single();
-            
-            if (roomError) {
-                throw new Error(`Chat room not found or invalid.`);
-            }
+            const { error: roomError } = await supabase.from('rooms').select('id').eq('id', roomId).single();
+            if (roomError) throw new Error(`Chat room not found or invalid.`);
         }
 
-        const storedMessages: Message[] = messageData.map(msg => ({ author: msg.author as Author, text: msg.text }));
+        const storedMessages: Message[] = messageData.map(msg => ({ id: msg.id, author: msg.author as Author, text: msg.text }));
         setMessages(storedMessages);
 
-        // Initialize Gemini AI
-        if (!process.env.API_KEY) {
-          throw new Error("API_KEY environment variable not set.");
-        }
+        if (!process.env.API_KEY) throw new Error("API_KEY environment variable not set.");
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const chatSession = ai.chats.create({
           model: 'gemini-2.5-flash',
           config: {
             systemInstruction: 'You are an AI assistant in a retro-terminal chat application called "Chat Like Look Solutions". Your persona is that of a terminal-based bot. Your knowledge is strictly limited to the current conversation\'s history. Respond only with information from this chat. Be concise, helpful, and maintain the terminal aesthetic. Use markdown for formatting where appropriate.',
           },
-          // Prime the chat session with the loaded history
           history: storedMessages.map(msg => ({
             role: msg.author === Author.USER ? 'user' : 'model',
             parts: [{ text: msg.text }],
@@ -82,13 +149,8 @@ const App: React.FC = () => {
 
       } catch (error) {
         console.error("Failed to load room or initialize Gemini AI:", error);
-        const errorMessage = (error && typeof error === 'object' && 'message' in error) 
-          ? String(error.message) 
-          : 'Unknown error';
-        setMessages([
-          { author: Author.BOT, text: `Error: Could not load chat room. Details: ${errorMessage}` },
-        ]);
-        // Clear the invalid room from the URL and state to return to lobby
+        const errorMessage = (error && typeof error === 'object' && 'message' in error) ? String(error.message) : 'Unknown error';
+        setMessages([{ author: Author.BOT, text: `Error: Could not load chat room. Details: ${errorMessage}` }]);
         window.history.replaceState({}, '', window.location.pathname);
         setRoomId(null);
       } finally {
@@ -97,117 +159,148 @@ const App: React.FC = () => {
     };
 
     loadRoomAndInitializeChat();
+
+    // Subscribe to realtime updates for the current room
+    const channel = supabase
+      .channel(`room-${roomId}`)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `room_id=eq.${roomId}` },
+        (payload) => {
+          const newMessage = payload.new as { id: number; author: Author; text: string };
+          setMessages((currentMessages) => {
+            // Update optimistic message with its DB-assigned ID
+            // FIX: Replaced `findLastIndex` with a manual reverse loop to support older JS environments.
+            let optimisticMsgIndex = -1;
+            for (let i = currentMessages.length - 1; i >= 0; i--) {
+                const msg = currentMessages[i];
+                if (!msg.id && msg.author === newMessage.author && msg.text === newMessage.text) {
+                    optimisticMsgIndex = i;
+                    break;
+                }
+            }
+            if (optimisticMsgIndex !== -1) {
+              const updatedMessages = [...currentMessages];
+              updatedMessages[optimisticMsgIndex] = newMessage;
+              return updatedMessages;
+            }
+            // Add new message if it's not already present
+            if (!currentMessages.some(msg => msg.id === newMessage.id)) {
+              if (document.hidden) {
+                playNotificationSound();
+                drawFavicon(true);
+              }
+              return [...currentMessages, newMessage];
+            }
+            return currentMessages;
+          });
+        }
+      ).subscribe();
+
+    // Cleanup subscription on component unmount or room change
+    return () => {
+      supabase.removeChannel(channel);
+    };
+
   }, [roomId]);
 
-  // Function to scroll to the latest message.
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  // Effect to scroll down when new messages are added or updated.
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+  useEffect(scrollToBottom, [messages]);
 
-  // Effect to focus the input field when the app loads or after a bot response.
   useEffect(() => {
     if (!isLoading) {
       inputRef.current?.focus();
     }
   }, [isLoading]);
   
-  // Handler for creating a new room in Supabase
+  const initializeAudio = () => {
+    if (!audioContextRef.current) {
+      try {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      } catch (e) {
+        console.error("Web Audio API is not supported in this browser.", e);
+      }
+    }
+  };
+
   const handleCreateRoom = async () => {
+    initializeAudio();
     setIsCreatingRoom(true);
     try {
-        if (!process.env.API_KEY) {
-            throw new Error("API_KEY environment variable not set.");
-        }
+        if (!process.env.API_KEY) throw new Error("API_KEY environment variable not set.");
         
-        // 1. Create a new room in Supabase
-        const { data: roomData, error: roomError } = await supabase
-            .from('rooms')
-            .insert({})
-            .select()
-            .single();
-
+        const { data: roomData, error: roomError } = await supabase.from('rooms').insert({}).select().single();
         if (roomError) throw new Error(roomError.message);
         const newRoomId = roomData.id;
 
-        // 2. Get a welcome message from the AI
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
             contents: "Generate a short, friendly welcome message for the Chat Like Look Solutions terminal. Greet the user and invite them to start chatting.",
         });
-
         const welcomeMessage: Message = { author: Author.BOT, text: response.text };
         
-        // 3. Save the initial message to the new room
-        const { error: messageError } = await supabase
-            .from('messages')
-            .insert({
+        const { error: messageError } = await supabase.from('messages').insert({
                 room_id: newRoomId,
                 author: welcomeMessage.author,
                 text: welcomeMessage.text,
             });
-        
         if (messageError) throw new Error(messageError.message);
         
-        // 4. Update the browser URL and app state to enter the new room
         window.history.pushState({}, '', `?room=${newRoomId}`);
         setRoomId(newRoomId);
 
     } catch (error) {
         console.error("Failed to create room:", error);
-        const errorMessage = (error && typeof error === 'object' && 'message' in error) 
-          ? String(error.message) 
-          : 'Unknown error';
+        const errorMessage = (error && typeof error === 'object' && 'message' in error) ? String(error.message) : 'Unknown error';
         alert(`Failed to create a new chat room. Please check the console for details. Error: ${errorMessage}`);
     } finally {
         setIsCreatingRoom(false);
     }
   };
 
-  // Handler for form submission to send a message and stream the response.
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    initializeAudio();
     if (!input.trim() || isLoading || !chat || !roomId) return;
 
     const userMessage: Message = { author: Author.USER, text: input };
-    const messagesBeforeResponse = [...messages, userMessage];
-
-    // Optimistically update UI with user message and bot placeholder
-    setMessages([...messagesBeforeResponse, { author: Author.BOT, text: '' }]);
+    setMessages(prev => [...prev, userMessage]);
     
     const currentInput = input;
     setInput('');
+    
+    // Save user message (realtime will handle UI sync)
+    await supabase.from('messages').insert({
+        room_id: roomId,
+        author: userMessage.author,
+        text: userMessage.text,
+    });
+
     setIsLoading(true);
-
     try {
-      // 1. Save user message to Supabase
-      const { error: userMessageError } = await supabase.from('messages').insert({
-          room_id: roomId,
-          author: userMessage.author,
-          text: userMessage.text,
-      });
-      if (userMessageError) throw new Error(userMessageError.message);
-
       const responseStream = await chat.sendMessageStream({ message: currentInput });
       let accumulatedText = "";
       for await (const chunk of responseStream) {
         accumulatedText += chunk.text;
-        // Update the UI with the streaming response
-        setMessages([...messagesBeforeResponse, { author: Author.BOT, text: accumulatedText }]);
+        setMessages(prev => {
+            const newMessages = [...prev];
+            const lastMessage = newMessages[newMessages.length - 1];
+            if (lastMessage && lastMessage.author === Author.BOT) {
+                lastMessage.text = accumulatedText;
+                return newMessages;
+            } else {
+                return [...newMessages, {author: Author.BOT, text: accumulatedText}];
+            }
+        });
       }
 
-      // After the stream is complete, save the new full history to Supabase
-      const { error: botMessageError } = await supabase.from('messages').insert({
+      await supabase.from('messages').insert({
           room_id: roomId,
           author: Author.BOT,
           text: accumulatedText,
       });
-      if (botMessageError) throw new Error(botMessageError.message);
 
     } catch (error) {
       console.error("Supabase or Gemini API error:", error);
@@ -221,12 +314,11 @@ const App: React.FC = () => {
     }
   };
 
-  // Handler for the invite button
   const handleInviteClick = async () => {
     try {
       await navigator.clipboard.writeText(window.location.href);
       setCopyText('Copied!');
-      setTimeout(() => setCopyText('Invite'), 2000); // Reset after 2 seconds
+      setTimeout(() => setCopyText('Invite'), 2000);
     } catch (err) {
       console.error('Failed to copy text: ', err);
       setCopyText('Failed!');
@@ -234,7 +326,6 @@ const App: React.FC = () => {
     }
   };
   
-  // Render lobby if not in a room
   if (!roomId) {
     return (
       <div className="bg-black text-green-400 font-mono h-screen flex flex-col items-center justify-center antialiased selection:bg-green-800 selection:text-green-100">
@@ -258,7 +349,6 @@ const App: React.FC = () => {
     );
   }
 
-  // Render loading state while fetching room data for the first time
   if (isLoading && messages.length === 0) {
     return (
         <div className="bg-black text-green-400 font-mono h-screen flex flex-col items-center justify-center antialiased">
@@ -276,7 +366,6 @@ const App: React.FC = () => {
     );
   }
 
-  // Render chat UI if in a room
   return (
     <div className="bg-black text-green-400 font-mono h-screen flex flex-col antialiased selection:bg-green-800 selection:text-green-100" onClick={() => inputRef.current?.focus()}>
       <header className="p-3 md:p-4 border-b-2 border-green-700 flex justify-between items-center shadow-lg shadow-green-900/50">
@@ -295,7 +384,7 @@ const App: React.FC = () => {
 
       <main className="flex-1 p-4 overflow-y-auto space-y-4">
         {messages.map((msg, index) => (
-          <div key={index} className="flex flex-col md:flex-row md:items-start">
+          <div key={msg.id || index} className="flex flex-col md:flex-row md:items-start">
             <span className={`flex-shrink-0 ${msg.author === Author.USER ? "text-green-300" : "text-green-500"}`}>
               {msg.author === Author.USER ? 'user@local:~$' : 'looks-bot@remote:~#'}
             </span>

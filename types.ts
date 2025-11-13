@@ -4,6 +4,7 @@ export enum Author {
 }
 
 export interface Message {
+  id?: number;
   author: Author;
   text: string;
 }
