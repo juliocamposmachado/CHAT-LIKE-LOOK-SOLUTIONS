@@ -2,43 +2,12 @@
 import React, { useState, useEffect, useRef, FormEvent } from 'react';
 import { GoogleGenAI, Chat } from '@google/genai';
 import { Message, Author } from './types';
+import { supabase } from './supabaseClient';
 
 // A simple component for the blinking cursor effect.
 const BlinkingCursor: React.FC = () => (
   <div className="w-2 h-5 bg-green-400 animate-pulse ml-1" />
 );
-
-/**
- * Saves the chat history to dpaste.org and returns the new snippet ID.
- * @param messages The array of messages to save.
- * @returns A promise that resolves to the new dpaste snippet ID.
- */
-const saveChatHistory = async (messages: Message[]): Promise<string> => {
-  const formData = new FormData();
-  formData.append('content', JSON.stringify(messages, null, 2));
-  formData.append('format', 'json');
-  formData.append('lexer', 'json');
-  formData.append('expires', '2592000'); // Expires in 1 month
-
-  const response = await fetch('https://dpaste.org/api/', {
-    method: 'POST',
-    body: formData,
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Failed to save to dpaste: ${response.status} ${response.statusText} - ${errorText}`);
-  }
-
-  const data = await response.json();
-  if (!data.url) {
-    throw new Error('dpaste.org API did not return a URL.');
-  }
-  // Extract the snippet ID from the full URL (e.g., "EBKU" from "https://dpaste.org/EBKU")
-  const snippetId = data.url.substring(data.url.lastIndexOf('/') + 1);
-  return snippetId;
-};
-
 
 // The main application component.
 const App: React.FC = () => {
@@ -61,20 +30,36 @@ const App: React.FC = () => {
     }
   }, []);
 
-  // Load a room from dpaste.org and initialize the chat session.
+  // Load a room from Supabase and initialize the chat session.
   useEffect(() => {
     const loadRoomAndInitializeChat = async () => {
       if (!roomId) return;
 
       setIsLoading(true);
       try {
-        // Fetch chat history from the raw dpaste URL
-        const response = await fetch(`https://dpaste.org/${roomId}/raw`);
-        if (!response.ok) {
-          throw new Error(`Chat room not found or expired.`);
+        // Fetch chat history from Supabase
+        const { data: messageData, error: messageError } = await supabase
+          .from('messages')
+          .select('*')
+          .eq('room_id', roomId)
+          .order('created_at', { ascending: true });
+
+        if (messageError) throw new Error(messageError.message);
+        
+        // If no messages, check if room exists but is empty. If room doesn't exist, this will throw.
+        if (messageData.length === 0) {
+            const { error: roomError } = await supabase
+                .from('rooms')
+                .select('id')
+                .eq('id', roomId)
+                .single();
+            
+            if (roomError) {
+                throw new Error(`Chat room not found or invalid.`);
+            }
         }
-        const historyText = await response.text();
-        const storedMessages: Message[] = JSON.parse(historyText);
+
+        const storedMessages: Message[] = messageData.map(msg => ({ author: msg.author as Author, text: msg.text }));
         setMessages(storedMessages);
 
         // Initialize Gemini AI
@@ -97,9 +82,15 @@ const App: React.FC = () => {
 
       } catch (error) {
         console.error("Failed to load room or initialize Gemini AI:", error);
+        const errorMessage = (error && typeof error === 'object' && 'message' in error) 
+          ? String(error.message) 
+          : 'Unknown error';
         setMessages([
-          { author: Author.BOT, text: `Error: Could not load chat room. Details: ${error instanceof Error ? error.message : 'Unknown error'}` },
+          { author: Author.BOT, text: `Error: Could not load chat room. Details: ${errorMessage}` },
         ]);
+        // Clear the invalid room from the URL and state to return to lobby
+        window.history.replaceState({}, '', window.location.pathname);
+        setRoomId(null);
       } finally {
         setIsLoading(false);
       }
@@ -125,34 +116,54 @@ const App: React.FC = () => {
     }
   }, [isLoading]);
   
-  // Handler for creating a new room by saving an initial message to dpaste.org
+  // Handler for creating a new room in Supabase
   const handleCreateRoom = async () => {
     setIsCreatingRoom(true);
     try {
         if (!process.env.API_KEY) {
             throw new Error("API_KEY environment variable not set.");
         }
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        
+        // 1. Create a new room in Supabase
+        const { data: roomData, error: roomError } = await supabase
+            .from('rooms')
+            .insert({})
+            .select()
+            .single();
 
-        // Get a welcome message from the AI
+        if (roomError) throw new Error(roomError.message);
+        const newRoomId = roomData.id;
+
+        // 2. Get a welcome message from the AI
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
             contents: "Generate a short, friendly welcome message for the Chat Like Look Solutions terminal. Greet the user and invite them to start chatting.",
         });
 
         const welcomeMessage: Message = { author: Author.BOT, text: response.text };
-        const initialMessages = [welcomeMessage];
         
-        // Save the initial message to dpaste to create the room
-        const newSnippetId = await saveChatHistory(initialMessages);
+        // 3. Save the initial message to the new room
+        const { error: messageError } = await supabase
+            .from('messages')
+            .insert({
+                room_id: newRoomId,
+                author: welcomeMessage.author,
+                text: welcomeMessage.text,
+            });
         
-        // Update the browser URL and app state to enter the new room
-        window.history.pushState({}, '', `?room=${newSnippetId}`);
-        setRoomId(newSnippetId);
+        if (messageError) throw new Error(messageError.message);
+        
+        // 4. Update the browser URL and app state to enter the new room
+        window.history.pushState({}, '', `?room=${newRoomId}`);
+        setRoomId(newRoomId);
 
     } catch (error) {
         console.error("Failed to create room:", error);
-        alert(`Failed to create a new chat room. Please check the console for details. Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        const errorMessage = (error && typeof error === 'object' && 'message' in error) 
+          ? String(error.message) 
+          : 'Unknown error';
+        alert(`Failed to create a new chat room. Please check the console for details. Error: ${errorMessage}`);
     } finally {
         setIsCreatingRoom(false);
     }
@@ -161,7 +172,7 @@ const App: React.FC = () => {
   // Handler for form submission to send a message and stream the response.
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isLoading || !chat) return;
+    if (!input.trim() || isLoading || !chat || !roomId) return;
 
     const userMessage: Message = { author: Author.USER, text: input };
     const messagesBeforeResponse = [...messages, userMessage];
@@ -174,6 +185,14 @@ const App: React.FC = () => {
     setIsLoading(true);
 
     try {
+      // 1. Save user message to Supabase
+      const { error: userMessageError } = await supabase.from('messages').insert({
+          room_id: roomId,
+          author: userMessage.author,
+          text: userMessage.text,
+      });
+      if (userMessageError) throw new Error(userMessageError.message);
+
       const responseStream = await chat.sendMessageStream({ message: currentInput });
       let accumulatedText = "";
       for await (const chunk of responseStream) {
@@ -182,16 +201,16 @@ const App: React.FC = () => {
         setMessages([...messagesBeforeResponse, { author: Author.BOT, text: accumulatedText }]);
       }
 
-      // After the stream is complete, save the new full history to dpaste
-      const finalMessages = [...messagesBeforeResponse, { author: Author.BOT, text: accumulatedText }];
-      const newSnippetId = await saveChatHistory(finalMessages);
-      
-      // Update the URL and roomId to point to the new snippet, preserving the chat state
-      window.history.pushState({}, '', `?room=${newSnippetId}`);
-      setRoomId(newSnippetId);
+      // After the stream is complete, save the new full history to Supabase
+      const { error: botMessageError } = await supabase.from('messages').insert({
+          room_id: roomId,
+          author: Author.BOT,
+          text: accumulatedText,
+      });
+      if (botMessageError) throw new Error(botMessageError.message);
 
     } catch (error) {
-      console.error("Gemini API or dpaste error:", error);
+      console.error("Supabase or Gemini API error:", error);
       const errorMessage: Message = {
         author: Author.BOT,
         text: 'Sorry, I encountered an error. Please try again.',
